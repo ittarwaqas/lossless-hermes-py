@@ -469,12 +469,14 @@ class LcmContextEngine(ContextEngine):
         base_url: str = "",
         api_key: str = "",
         provider: str = "",
+        api_mode: str = "",
     ) -> None:
         """Called when the user switches models."""
         self.model = model
         self.base_url = base_url
         self.api_key = api_key
         self.provider = provider
+        self.api_mode = api_mode
         self.context_length = context_length
         self.threshold_tokens = int(context_length * self.config.context_threshold)
 
