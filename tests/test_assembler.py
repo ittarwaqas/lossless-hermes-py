@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from lossless_hermes.assembler import AssemblyConfig, ContextAssembler
-from lossless_hermes.store.conversation import CreateMessageInput
+from lossless_hermes.store.conversation import CreateMessageInput, CreateMessagePartInput
 from lossless_hermes.store.summary import CreateSummaryInput
 
 
@@ -127,3 +127,77 @@ class TestContextAssembler:
         config = AssemblyConfig(max_tokens=100000, fresh_tail_count=5, fresh_tail_max_tokens=None)
         result = assembler.assemble_context(conv.conversation_id, config)
         assert 0.0 < result.coverage_ratio <= 1.0
+
+    def test_tool_call_id_linkage_preserved(self, assembler, conversation_store, db):
+        """
+        Verify _message_to_dict includes tool_call_id for tool-role messages
+        and tool_calls for assistant messages with stored message_parts.
+        This is the fix for the 'tool id() not found (2013)' MiniMax error.
+        """
+        conv = conversation_store.create_conversation("tool-linkage")
+
+        # Step 1: Store an assistant message with a tool_call
+        asst_msg = conversation_store.create_message(
+            CreateMessageInput(
+                conversation_id=conv.conversation_id,
+                seq=1,
+                role="assistant",
+                content="Let me look that up.",
+                token_count=5,
+            )
+        )
+        # Add a tool_call message_part
+        conversation_store.create_message_part(
+            asst_msg.message_id,
+            CreateMessagePartInput(
+                session_id="tool-test",
+                part_type="tool",
+                ordinal=0,
+                tool_call_id="call_test123",
+                tool_name="web_search",
+                tool_input='{"query": "test query"}',
+            ),
+        )
+
+        # Step 2: Store a tool result message
+        tool_msg = conversation_store.create_message(
+            CreateMessageInput(
+                conversation_id=conv.conversation_id,
+                seq=2,
+                role="tool",
+                content='{"results": ["result1", "result2"]}',
+                token_count=10,
+            )
+        )
+        # Add a tool_result message_part with tool_call_id linking back
+        conversation_store.create_message_part(
+            tool_msg.message_id,
+            CreateMessagePartInput(
+                session_id="tool-test",
+                part_type="tool",
+                ordinal=0,
+                tool_call_id="call_test123",
+                tool_output='{"results": ["result1", "result2"]}',
+            ),
+        )
+
+        # Step 3: Assemble context
+        config = AssemblyConfig(max_tokens=10000, fresh_tail_count=10, fresh_tail_max_tokens=None)
+        result = assembler.assemble_context(conv.conversation_id, config)
+
+        # Step 4: Verify tool_call_id is present on the tool result message
+        tool_msgs = [m for m in result.messages if m.get("role") == "tool"]
+        assert len(tool_msgs) == 1, f"Expected 1 tool message, got {len(tool_msgs)}"
+        assert tool_msgs[0].get("tool_call_id") == "call_test123", (
+            f"Expected tool_call_id='call_test123', got {tool_msgs[0].get('tool_call_id')}"
+        )
+
+        # Step 5: Verify tool_calls are present on the assistant message
+        asst_msgs = [m for m in result.messages if m.get("role") == "assistant"]
+        tool_call_msgs = [m for m in asst_msgs if m.get("tool_calls")]
+        assert len(tool_call_msgs) == 1, f"Expected 1 assistant msg with tool_calls, got {len(tool_call_msgs)}"
+        tc = tool_call_msgs[0]["tool_calls"]
+        assert len(tc) == 1
+        assert tc[0]["id"] == "call_test123"
+        assert tc[0]["function"]["name"] == "web_search"
+        assert tc[0]["function"]["arguments"] == '{"query": "test query"}'

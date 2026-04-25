@@ -366,9 +366,37 @@ class LcmContextEngine(ContextEngine):
             )
 
             try:
-                self.conversation_store.create_message(msg_input)
+                msg_record = self.conversation_store.create_message(msg_input)
                 existing_hashes.add(identity)
                 added += 1
+
+                # Store tool_parts for assistant tool_calls and tool results so
+                # _message_to_dict can reconstruct tool_call_id linkage on replay.
+                session_id = self.current_session_id or "default_session"
+                if role == "assistant" and message.get("tool_calls"):
+                    for ordinal, tc in enumerate(message["tool_calls"]):
+                        import json as _json
+                        part_input = CreateMessagePartInput(
+                            session_id=session_id,
+                            part_type="tool",
+                            ordinal=ordinal,
+                            tool_call_id=tc.get("id", ""),
+                            tool_name=tc.get("function", {}).get("name", ""),
+                            tool_input=_json.dumps(tc.get("function", {}).get("arguments", {}))
+                            if isinstance(tc.get("function", {}).get("arguments"), dict)
+                            else str(tc.get("function", {}).get("arguments", "")),
+                        )
+                        self.conversation_store.create_message_part(msg_record.message_id, part_input)
+                if role == "tool" and message.get("tool_call_id"):
+                    part_input = CreateMessagePartInput(
+                        session_id=session_id,
+                        part_type="tool",
+                        ordinal=0,
+                        tool_call_id=message["tool_call_id"],
+                        tool_output=content_str,
+                    )
+                    self.conversation_store.create_message_part(msg_record.message_id, part_input)
+
             except Exception as e:
                 # Message might already exist, skip it
                 logger.debug(f"Skipping message ingestion: {e}")
@@ -501,6 +529,24 @@ class LcmContextEngine(ContextEngine):
         self.api_mode = api_mode
         self.context_length = context_length
         self.threshold_tokens = int(context_length * self.config.context_threshold)
+
+        # Wire the LLM call function into the summarizer so compaction doesn't
+        # fail with "No LLM call function provided to summarizer".  Reuse the
+        # lazy-resolution pattern from _ensure_initialized() to avoid circular
+        # imports at startup.
+        if self.call_llm_fn is None:
+            try:
+                from agent.auxiliary_client import async_call_llm
+                self.call_llm_fn = async_call_llm
+            except Exception as _imp_err:
+                logger.debug("Could not lazy-resolve async_call_llm in update_model: %s", _imp_err)
+
+        # Hot-reload the summarizer's LLM function if compaction engine exists
+        if self.compaction_engine is not None and self.call_llm_fn is not None:
+            summarizer = getattr(self.compaction_engine, "summarizer", None)
+            async_summarizer = getattr(summarizer, "async_summarizer", None) if summarizer else None
+            if async_summarizer is not None:
+                async_summarizer.call_llm_fn = self.call_llm_fn
 
         logger.info(f"LCM model updated: {model} (context: {context_length}, threshold: {self.threshold_tokens})")
 
