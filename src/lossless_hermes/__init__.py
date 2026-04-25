@@ -153,6 +153,17 @@ class LcmContextEngine(ContextEngine):
 
         logger.debug(f"LCM context engine constructed: model={model} provider={provider}")
 
+    def set_llm_fn(self, call_llm_fn: Any) -> None:
+        """Hot-reload the LLM call function after agent initialization.
+
+        Fixes the init-order bug where the summarizer is created with
+        call_llm_fn=None and then never updated.
+        """
+        self.call_llm_fn = call_llm_fn
+        if self.compaction_engine is not None:
+            self.compaction_engine.summarizer.async_summarizer.call_llm_fn = call_llm_fn
+            logger.debug("LCM summarizer LLM function hot-reloaded")
+
     def _ensure_initialized(self):
         """Ensure database and stores are initialized."""
         if not self.config.enabled:
@@ -169,6 +180,17 @@ class LcmContextEngine(ContextEngine):
             self.conversation_store = ConversationStore(db)
             self.summary_store = SummaryStore(db)
 
+            # Lazy-resolve the LLM call function if it wasn't injected at construction.
+            # This fixes the init-order bug where the summarizer is created before
+            # the agent has fully wired its client (common in plugin-engine paths).
+            _llm_fn = self.call_llm_fn
+            if _llm_fn is None:
+                try:
+                    from agent.auxiliary_client import async_call_llm
+                    _llm_fn = async_call_llm
+                except Exception as _imp_err:
+                    logger.debug("Could not lazy-resolve async_call_llm: %s", _imp_err)
+
             # Initialize engines
             summarizer = create_lcm_summarizer(
                 provider=self.config.summary_provider or self.provider,
@@ -177,7 +199,7 @@ class LcmContextEngine(ContextEngine):
                 custom_instructions=self.config.custom_instructions,
                 circuit_breaker_threshold=self.config.circuit_breaker_threshold,
                 circuit_breaker_cooldown_ms=self.config.circuit_breaker_cooldown_ms,
-                call_llm_fn=self.call_llm_fn,
+                call_llm_fn=_llm_fn,
             )
 
             compaction_config = CompactionConfig(
