@@ -282,11 +282,10 @@ NEW CONTENT TO INCORPORATE:
 
         # Add model overrides if provided
         if self.provider or self.model:
-            call_kwargs["main_runtime"] = {}
             if self.provider:
-                call_kwargs["main_runtime"]["provider"] = self.provider
+                call_kwargs["provider"] = self.provider
             if self.model:
-                call_kwargs["main_runtime"]["model"] = self.model
+                call_kwargs["model"] = self.model
 
         return await self.call_llm_fn(**call_kwargs)
 

@@ -218,8 +218,48 @@ class ContextAssembler:
         return f"[{message.role.upper()}]: {message.content}"
 
     def _message_to_dict(self, message: MessageRecord) -> dict[str, Any]:
-        """Convert MessageRecord to OpenAI message dict."""
-        return {"role": message.role, "content": message.content}
+        """Convert MessageRecord to OpenAI message dict.
+
+        Preserves tool_call linkage: tool-role messages include tool_call_id
+        so MiniMax can match tool results back to the originating tool_calls.
+        """
+        result: dict[str, Any] = {"role": message.role, "content": message.content}
+
+        # For tool messages, include the tool_call_id from message_parts so
+        # MiniMax can link the result back to the assistant's tool_call.
+        if message.role == "tool":
+            parts = self.conversation_store.get_message_parts(message.message_id)
+            for part in parts:
+                if part.part_type == "tool" and part.tool_call_id:
+                    result["tool_call_id"] = part.tool_call_id
+                    break
+
+        # For assistant messages that have tool_calls, reconstruct them from
+        # message_parts so the API can issue tool_call results.
+        if message.role == "assistant":
+            parts = self.conversation_store.get_message_parts(message.message_id)
+            tool_calls = []
+            for part in parts:
+                if part.part_type == "tool" and part.tool_call_id and part.tool_name:
+                    import json as _json
+                    tool_input = {}
+                    if part.tool_input:
+                        try:
+                            tool_input = _json.loads(part.tool_input)
+                        except Exception:
+                            tool_input = {"raw": part.tool_input}
+                    tool_calls.append({
+                        "id": part.tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": part.tool_name or "",
+                            "arguments": _json.dumps(tool_input) if isinstance(tool_input, dict) else str(tool_input),
+                        },
+                    })
+            if tool_calls:
+                result["tool_calls"] = tool_calls
+
+        return result
 
     def _summary_to_message(self, summary: SummaryRecord) -> dict[str, Any]:
         """Convert SummaryRecord to OpenAI message dict."""
